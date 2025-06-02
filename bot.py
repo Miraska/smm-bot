@@ -66,19 +66,22 @@ TARIFFS = {
 
 # Обновлённые промпты с указанием только разрешённых тегов
 GPT_PROMPT = (
-    "Перепиши пост не меняя его сути, обязательно сохраняя HTML-разметку (теги <b>, <i>, <a>, <code>, <pre>). "
+    "Перепиши немного пост своими словами не меняя его сути, обязательно сохраняя HTML-разметку "
+    "(теги <b>, <i>, <u>, <s>, <tg-spoiler>, <a>, <code>, <pre>, <blockquote>). "
     "Если в тексте есть URL-адреса, оберни их в теги <a href='URL'>URL</a>. "
     "Добавь свою разметку (например, делай заголовки жирными с помощью <b>), но сохраняй все ссылки в тегах <a> (обязательно сохраняй ссылки), "
     "кроме ссылок вида t.me/, которые находятся в конце текста. Удаляй упоминания аккаунтов (например, @username) "
-    "и слова 'не баг а фича', чтобы не было телеграмм ссылок вида t.me/, также удаляй текст INCUBE.AI | ПОДПИСАТЬСЯ если он присутствует. Сохраняй исходное форматирование и структуру текста. "
-    "Не используй никакие другие HTML-теги, кроме <b>, <i>, <a>, <code>, <pre>."
+    "и слова 'не баг а фича', чтобы не было телеграмм ссылок вида t.me/, также удаляй текст INCUBE.AI | ПОДПИСАТЬСЯ если он присутствует. "
+    "Сохраняй исходное форматирование и структуру текста. "
+    "Не используй никакие другие HTML-теги, кроме <b>, <i>, <u>, <s>, <tg-spoiler>, <a>, <code>, <pre>, <blockquote>."
 )
 
 CONDENSE_PROMPT = (
-    "Сократи этот текст, сохранив основную мысль, все ссылки в тегах <a>, HTML-разметку (теги <b>, <i>, <a>, <code>, <pre>) и структуру. "
+    "Сократи этот текст, сохранив основную мысль, все ссылки в тегах <a>, "
+    "HTML-разметку (теги <b>, <i>, <u>, <s>, <tg-spoiler>, <a>, <code>, <pre>, <blockquote>) и структуру. "
     "Если в тексте есть URL-адреса, убедись, что они обернуты в теги <a href='URL'>URL</a>. "
     "Убедись, что ключевые детали остаются в тексте, а сокращение минимально. "
-    "Не используй никакие другие HTML-теги, кроме <b>, <i>, <a>, <code>, <pre>."
+    "Не используй никакие другие HTML-теги, кроме <b>, <i>, <u>, <s>, <tg-spoiler>, <a>, <code>, <pre>, <blockquote>."
 )
 
 MAX_SYMBOLS_MESSAGE = 4096 
@@ -294,7 +297,7 @@ class BotStates(StatesGroup):
     default = State()
     waiting_for_channel = State()
     waiting_for_payment = State()
-    waiting_for_manual_edit = State()  # Новое состояние для ручного редактирования
+    waiting_for_manual_edit = State()
 
 # Миддлварь для альбомов
 class AlbumMiddleware(BaseMiddleware):
@@ -333,35 +336,76 @@ def format_text(text: str) -> str:
     return "\n".join(formatted_lines).strip()
 
 def clean_html_for_telegram(text: str) -> str:
-    """Очищает HTML, оставляя только поддерживаемые Telegram теги."""
+    """Очищает HTML, оставляя только поддерживаемые Telegram теги включая скрытый, подчеркнутый и зачеркнутый текст."""
     if not text:
         return ""
+    
     text = text.replace("\ufeff", "").replace("\u200b", "")
     soup = bs(text, "html.parser")
-    allowed_tags = {"b", "i", "a", "code", "pre"}
+    
+    # Полный список поддерживаемых Telegram тегов
+    allowed_tags = {
+        "b", "strong",           # жирный
+        "i", "em",              # курсив  
+        "u",                    # подчеркнутый
+        "s", "strike", "del",   # зачеркнутый
+        "spoiler", "tg-spoiler", # скрытый текст
+        "code",                 # моноширинный
+        "pre",                  # блок кода
+        "a",                    # ссылка
+        "blockquote"            # цитата
+    }
+    
     for tag in soup.find_all():
         if tag.name not in allowed_tags:
-            tag.unwrap()  # Удаляем тег, оставляя содержимое
+            tag.unwrap()
         else:
             if tag.name == "a":
+                # Для ссылок сохраняем только href атрибут
                 if "href" not in tag.attrs:
                     tag.unwrap()
                 else:
                     tag.attrs = {"href": tag["href"]}
+            elif tag.name in ["spoiler", "tg-spoiler"]:
+                # Конвертируем в стандартный тег spoiler для Telegram
+                tag.name = "tg-spoiler" 
+                tag.attrs = {}
+            elif tag.name in ["s", "strike", "del"]:
+                # Конвертируем все варианты зачеркнутого в стандартный <s>
+                tag.name = "s"
+                tag.attrs = {}
+            elif tag.name in ["strong"]:
+                # Конвертируем <strong> в <b>
+                tag.name = "b"
+                tag.attrs = {}
+            elif tag.name in ["em"]:
+                # Конвертируем <em> в <i>
+                tag.name = "i"
+                tag.attrs = {}
             else:
-                tag.attrs = {}  # Удаляем все атрибуты у других тегов
+                # Для остальных тегов убираем все атрибуты
+                tag.attrs = {}
+    
     cleaned_text = str(soup)
     cleaned_text = format_text(cleaned_text)
-    return cleaned_text  # Убрали html.unescape
+    return cleaned_text
+
 
 def truncate_html(text: str, trunc: int) -> str:
     """Обрезает текст до указанной длины, сохраняя HTML-структуру."""
     soup = bs(text, "html.parser")
-    if len(soup.get_text()) <= trunc:
-        return str(soup)
-    truncated_raw = soup.get_text()[:trunc]
-    truncated_soup = bs(truncated_raw, "html.parser")
-    return str(truncated_soup)
+    current_length = 0
+    for node in soup.find_all(text=True):
+        if node.parent.name in ["b", "i", "a", "code", "pre"]:
+            text_content = node.string
+            if text_content:
+                if current_length + len(text_content) > trunc:
+                    allowed_length = trunc - current_length
+                    node.string = text_content[:allowed_length] + "..."
+                    current_length += allowed_length
+                    break
+                current_length += len(text_content)
+    return str(soup)
 
 async def chat_completion(
     prompt: str, custom_prompt: Optional[str] = None
@@ -422,16 +466,35 @@ async def rewrite(
                 "error": "OpenAI вернул пустой ответ на втором этапе.",
             }
 
-    # Добавляем ссылку и обрезаем при необходимости
+    # Добавляем ссылку только если её еще нет
     if trunc:
-        max_content_length = trunc - len(LINK_APPEND)
-        truncated = truncate_html(final_text, max_content_length)
-        final_text = f"{truncated}{LINK_APPEND}"
+        # Сначала добавляем ссылку, затем обрезаем
+        final_text_with_link = add_link_once(final_text)
+        if len(final_text_with_link) > trunc:
+            # Если превышает лимит, обрезаем основной текст
+            max_content_length = trunc - len(LINK_APPEND)
+            truncated = truncate_html(final_text, max_content_length)
+            final_text = add_link_once(truncated)
+        else:
+            final_text = final_text_with_link
     else:
-        final_text = f"{final_text}{LINK_APPEND}"
+        final_text = add_link_once(final_text)
 
     final_text = clean_html_for_telegram(final_text)
     return {"ok": True, "text": final_text, "error": ""}
+
+
+# Функция для добавления ссылки только один раз
+def add_link_once(text: str) -> str:
+    """Добавляет ссылку на канал только если её еще нет в тексте."""
+    if not text:
+        return LINK_APPEND.strip()
+    
+    # Проверяем, есть ли уже ссылка в тексте
+    if LINK_CAPTION in text or CHANNEL_URL in text:
+        return text
+    
+    return f"{text}{LINK_APPEND}"
 
 # Клавиатуры
 def get_preview_keyboard(allow_edit=True):
@@ -806,7 +869,7 @@ async def confirm_handler(callback: types.CallbackQuery, state: FSMContext):
                         )
                     )
             await bot.send_media_group(channel_id, media_group)
-        await callback.message.edit_reply_markup(reply_markup=None)  # Удаляем клавиатуру после отправки
+        await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer("✅ Сообщение отправлено в канал.")
     except Exception as e:
         logging.error(f"Ошибка при отправке в канал: {e}")
@@ -821,17 +884,40 @@ async def edit_manual_handler(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("Отправьте отредактированный текст:")
     await state.set_state(BotStates.waiting_for_manual_edit)
 
+
+# Обновленная функция обработки ручного редактирования
 @dp.message(BotStates.waiting_for_manual_edit)
 async def process_manual_edit(message: types.Message, state: FSMContext):
-    edited_text = message.text
+    # Получаем текст с полной разметкой через html_text
+    edited_text = message.html_text
+    
+    if not edited_text:
+        await message.answer("❌ Пустое сообщение. Попробуйте снова.")
+        return
+    
+    # Используем расширенную функцию очистки
+    cleaned_text = clean_html_for_telegram(edited_text)
+    
     data = await state.get_data()
     preview_data = data.get("preview_data")
+    
+    if not preview_data:
+        await message.answer("❌ Ошибка: данные для редактирования отсутствуют.")
+        return
+    
+    # Добавляем ссылку на канал только если её еще нет
+    final_text = add_link_once(cleaned_text)
+    
     if preview_data["type"] == "text":
-        preview_data["text"] = edited_text + LINK_APPEND
+        preview_data["text"] = final_text
     else:
-        preview_data["caption"] = edited_text + LINK_APPEND
+        preview_data["caption"] = final_text
+    
     await state.update_data(preview_data=preview_data)
+    await message.answer("✅ Текст отредактирован, отправляю обновленное превью...")
     await send_preview(message, state)
+
+
 
 @dp.callback_query(F.data == "regenerate")
 async def regenerate_handler(callback: types.CallbackQuery, state: FSMContext):
