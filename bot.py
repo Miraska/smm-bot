@@ -66,15 +66,17 @@ TARIFFS = {
 
 # Обновлённые промпты с указанием только разрешённых тегов
 GPT_PROMPT = (
-    "Перепиши пост не меняя его сути, обязательно сохраняя HTML-разметку (теги <b>, <i>, <a>, <code>, <pre>), "
-    "добавь свою разметку (например, делай заголовки жирными с помощью <b>), но сохраняй все ссылки в тегах <a> (обязательно), "
+    "Перепиши пост не меняя его сути, обязательно сохраняя HTML-разметку (теги <b>, <i>, <a>, <code>, <pre>). "
+    "Если в тексте есть URL-адреса, оберни их в теги <a href='URL'>URL</a>. "
+    "Добавь свою разметку (например, делай заголовки жирными с помощью <b>), но сохраняй все ссылки в тегах <a> (обязательно сохраняй ссылки), "
     "кроме ссылок вида t.me/, которые находятся в конце текста. Удаляй упоминания аккаунтов (например, @username) "
-    "и слова 'не баг а фича'. Сохраняй исходное форматирование и структуру текста. "
+    "и слова 'не баг а фича', чтобы не было телеграмм ссылок вида t.me/, также удаляй текст INCUBE.AI | ПОДПИСАТЬСЯ если он присутствует. Сохраняй исходное форматирование и структуру текста. "
     "Не используй никакие другие HTML-теги, кроме <b>, <i>, <a>, <code>, <pre>."
 )
 
 CONDENSE_PROMPT = (
     "Сократи этот текст, сохранив основную мысль, все ссылки в тегах <a>, HTML-разметку (теги <b>, <i>, <a>, <code>, <pre>) и структуру. "
+    "Если в тексте есть URL-адреса, убедись, что они обернуты в теги <a href='URL'>URL</a>. "
     "Убедись, что ключевые детали остаются в тексте, а сокращение минимально. "
     "Не используй никакие другие HTML-теги, кроме <b>, <i>, <a>, <code>, <pre>."
 )
@@ -336,7 +338,6 @@ def clean_html_for_telegram(text: str) -> str:
         return ""
     text = text.replace("\ufeff", "").replace("\u200b", "")
     soup = bs(text, "html.parser")
-    # Только официально поддерживаемые Telegram теги
     allowed_tags = {"b", "i", "a", "code", "pre"}
     for tag in soup.find_all():
         if tag.name not in allowed_tags:
@@ -346,12 +347,12 @@ def clean_html_for_telegram(text: str) -> str:
                 if "href" not in tag.attrs:
                     tag.unwrap()
                 else:
-                    tag.attrs = {"href": tag["href"]}  # Оставляем только href для <a>
+                    tag.attrs = {"href": tag["href"]}
             else:
                 tag.attrs = {}  # Удаляем все атрибуты у других тегов
     cleaned_text = str(soup)
     cleaned_text = format_text(cleaned_text)
-    return html.unescape(cleaned_text)
+    return cleaned_text  # Убрали html.unescape
 
 def truncate_html(text: str, trunc: int) -> str:
     """Обрезает текст до указанной длины, сохраняя HTML-структуру."""
@@ -370,7 +371,7 @@ async def chat_completion(
     system_message = custom_prompt if custom_prompt else GPT_PROMPT
     try:
         response = await openai.ChatCompletion.acreate(
-            model="gpt-4",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt},
@@ -859,7 +860,13 @@ async def regenerate_handler(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "cancel")
 async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("❌ Действие отменено.", reply_markup=None)
+    if callback.message.text:
+        await callback.message.edit_text("❌ Действие отменено.", reply_markup=None)
+    elif callback.message.caption:
+        await callback.message.edit_caption(caption="❌ Действие отменено.", reply_markup=None)
+    else:
+        await callback.message.delete()
+        await callback.message.answer("❌ Действие отменено.")
     await state.set_state(BotStates.default)
 
 @dp.callback_query(F.data == "cancel_payment")
