@@ -29,28 +29,13 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 
 import aiohttp
-from aiohttp_socks import ProxyConnector
-
-from openai.error import (
-    PermissionError as OpenAIPermissionError,
-    RateLimitError,
-    APIConnectionError,
-    OpenAIError,
-)
 
 load_dotenv(override=True)
-
-# Настройка прокси
-PROXY_HOST = os.getenv("PROXY_HOST")
-PROXY_PORT = os.getenv("PROXY_PORT")
-PROXY_USERNAME = os.getenv("PROXY_USERNAME")
-PROXY_PASSWORD = os.getenv("PROXY_PASSWORD")
-proxy_url = f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
 
 # Константы
 NL = "\n"
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 CHANNEL_URL = os.getenv("CHANNEL_URL")
 ADMIN_USERNAMES = os.getenv("ADMIN_USERNAMES", "").split(",")
@@ -91,7 +76,9 @@ LINK_CAPTION = "INCUBE.AI | ПОДПИСАТЬСЯ"
 LINK_APPEND = f'{NL * 2}<a href="{CHANNEL_URL}">{LINK_CAPTION}</a>'
 MAX_SYMBOLS_CAPTION = 1024
 
-openai.api_key = OPENAI_API_KEY
+# Настройка OpenRouter
+openai.api_key = OPENROUTER_API_KEY
+openai.api_base = "https://openrouter.ai/api/v1"
 
 # Логирование
 logging.basicConfig(
@@ -101,7 +88,7 @@ logging.basicConfig(
 )
 
 # Инициализация бота и FSM
-session_for_bot = AiohttpSession(proxy=proxy_url)
+session_for_bot = AiohttpSession()
 bot = Bot(
     token=TG_BOT_TOKEN,
     session=session_for_bot,
@@ -390,7 +377,6 @@ def clean_html_for_telegram(text: str) -> str:
     cleaned_text = format_text(cleaned_text)
     return cleaned_text
 
-
 def truncate_html(text: str, trunc: int) -> str:
     """Обрезает текст до указанной длины, сохраняя HTML-структуру."""
     soup = bs(text, "html.parser")
@@ -415,7 +401,7 @@ async def chat_completion(
     system_message = custom_prompt if custom_prompt else GPT_PROMPT
     try:
         response = await openai.ChatCompletion.acreate(
-            model="gpt-4o",
+            model="anthropic/claude-sonnet-4",  # Используем модель OpenAI через OpenRouter
             messages=[
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt},
@@ -483,7 +469,6 @@ async def rewrite(
     final_text = clean_html_for_telegram(final_text)
     return {"ok": True, "text": final_text, "error": ""}
 
-
 # Функция для добавления ссылки только один раз
 def add_link_once(text: str) -> str:
     """Добавляет ссылку на канал только если её еще нет в тексте."""
@@ -520,7 +505,7 @@ def get_tariffs_keyboard():
     return builder.as_markup()
 
 preview_keyboard = get_preview_keyboard(allow_edit=True)
-album_preview_keyboard = get_preview_keyboard(allow_edit=False)
+album_preview_keyboard = get_preview_keyboard(allow_edit=True)
 tariffs_keyboard = get_tariffs_keyboard()
 
 # Функция отправки превью с обработкой ошибок
@@ -539,6 +524,7 @@ async def send_preview(message: types.Message, state: FSMContext):
                 parse_mode=ParseMode.HTML,
                 reply_markup=preview_keyboard,
             )
+            await state.update_data(preview_message_id=preview_msg.message_id)
         elif message_type in ["photo", "video", "animation", "document"]:
             if message_type == "photo":
                 preview_msg = await bot.send_photo(
@@ -572,34 +558,36 @@ async def send_preview(message: types.Message, state: FSMContext):
                     parse_mode=ParseMode.HTML,
                     reply_markup=preview_keyboard,
                 )
+            await state.update_data(preview_message_id=preview_msg.message_id)
         elif message_type == "media_group":
             media_group = []
-            for item in preview_data["media"]:
+            for i, item in enumerate(preview_data["media"]):
                 if item["type"] == "photo":
-                    media_group.append(
-                        types.InputMediaPhoto(
-                            media=item["media"],
-                            caption=item.get("caption"),
-                            parse_mode=item.get("parse_mode"),
-                        )
+                    media = types.InputMediaPhoto(
+                        media=item["media"],
+                        caption=preview_data["caption"] if i == 0 else None,
+                        parse_mode=ParseMode.HTML if i == 0 else None,
                     )
                 elif item["type"] == "video":
-                    media_group.append(
-                        types.InputMediaVideo(
-                            media=item["media"],
-                            caption=item.get("caption"),
-                            parse_mode=item.get("parse_mode"),
-                        )
+                    media = types.InputMediaVideo(
+                        media=item["media"],
+                        caption=preview_data["caption"] if i == 0 else None,
+                        parse_mode=ParseMode.HTML if i == 0 else None,
                     )
-            await bot.send_media_group(message.chat.id, media_group)
+                media_group.append(media)
+            sent_messages = await bot.send_media_group(message.chat.id, media_group)
             preview_msg = await message.answer(
-                "Превью альбома выше", reply_markup=album_preview_keyboard
+                "Превью альбома выше", reply_markup=preview_keyboard
             )
-        await state.update_data(preview_message_id=preview_msg.message_id)
+            await state.update_data(
+                media_group_message_ids=[msg.message_id for msg in sent_messages],
+                preview_message_id=preview_msg.message_id
+            )
     except TelegramBadRequest as e:
         logging.error(f"Ошибка отправки сообщения: {e}, текст: {preview_data.get('caption') or preview_data.get('text')}")
         await message.edit_text("❌ Ошибка при отправке превью: неверный формат текста. Попробуйте снова.")
         return
+    
 
 # Хендлеры команд
 @dp.message(CommandStart())
@@ -771,7 +759,7 @@ async def album_handler(
     if not final_caption:
         final_caption = LINK_APPEND.strip()
     media_list = []
-    for i, obj in enumerate(album):
+    for obj in album:
         media = getattr(obj, obj.content_type, None)
         if not media:
             continue
@@ -780,19 +768,21 @@ async def album_handler(
         file_id = getattr(media, "file_id", None)
         if not file_id:
             continue
-        caption = final_caption if i == 0 else None
         media_list.append(
             {
                 "type": obj.content_type,
                 "media": file_id,
-                "caption": caption,
-                "parse_mode": ParseMode.HTML if caption else None,
             }
         )
+    preview_data = {
+        "type": "media_group",
+        "media": media_list,
+        "caption": final_caption,
+    }
+    await state.update_data(preview_data=preview_data, original_text=combined_caption)
     await message.answer("✅ Альбом обработан, отправляю превью...")
-    await state.update_data(preview_data={"type": "media_group", "media": media_list})
     await send_preview(message, state)
-
+    
 # Обработчики кнопок
 @dp.callback_query(F.data == "confirm")
 async def confirm_handler(callback: types.CallbackQuery, state: FSMContext):
@@ -851,23 +841,20 @@ async def confirm_handler(callback: types.CallbackQuery, state: FSMContext):
                 )
         elif message_type == "media_group":
             media_group = []
-            for item in preview_data["media"]:
+            for i, item in enumerate(preview_data["media"]):
                 if item["type"] == "photo":
-                    media_group.append(
-                        types.InputMediaPhoto(
-                            media=item["media"],
-                            caption=item.get("caption"),
-                            parse_mode=item.get("parse_mode"),
-                        )
+                    media = types.InputMediaPhoto(
+                        media=item["media"],
+                        caption=preview_data["caption"] if i == 0 else None,
+                        parse_mode=ParseMode.HTML if i == 0 else None,
                     )
                 elif item["type"] == "video":
-                    media_group.append(
-                        types.InputMediaVideo(
-                            media=item["media"],
-                            caption=item.get("caption"),
-                            parse_mode=item.get("parse_mode"),
-                        )
+                    media = types.InputMediaVideo(
+                        media=item["media"],
+                        caption=preview_data["caption"] if i == 0 else None,
+                        parse_mode=ParseMode.HTML if i == 0 else None,
                     )
+                media_group.append(media)
             await bot.send_media_group(channel_id, media_group)
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer("✅ Сообщение отправлено в канал.")
@@ -878,46 +865,65 @@ async def confirm_handler(callback: types.CallbackQuery, state: FSMContext):
         )
     await state.set_state(BotStates.default)
 
+    
 @dp.callback_query(F.data == "edit_manual")
 async def edit_manual_handler(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer("Отправьте отредактированный текст:")
     await state.set_state(BotStates.waiting_for_manual_edit)
 
-
-# Обновленная функция обработки ручного редактирования
 @dp.message(BotStates.waiting_for_manual_edit)
 async def process_manual_edit(message: types.Message, state: FSMContext):
-    # Получаем текст с полной разметкой через html_text
     edited_text = message.html_text
-    
     if not edited_text:
         await message.answer("❌ Пустое сообщение. Попробуйте снова.")
         return
-    
-    # Используем расширенную функцию очистки
     cleaned_text = clean_html_for_telegram(edited_text)
-    
+    final_text = add_link_once(cleaned_text)
     data = await state.get_data()
     preview_data = data.get("preview_data")
-    
+    preview_message_id = data.get("preview_message_id")
+    media_group_message_ids = data.get("media_group_message_ids")
     if not preview_data:
         await message.answer("❌ Ошибка: данные для редактирования отсутствуют.")
         return
-    
-    # Добавляем ссылку на канал только если её еще нет
-    final_text = add_link_once(cleaned_text)
-    
+    if preview_data["type"] == "text":
+        await bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=preview_message_id,
+            text=final_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=preview_keyboard,
+        )
+    elif preview_data["type"] in ["photo", "video", "animation", "document"]:
+        await bot.edit_message_caption(
+            chat_id=message.chat.id,
+            message_id=preview_message_id,
+            caption=final_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=preview_keyboard,
+        )
+    elif preview_data["type"] == "media_group":
+        if media_group_message_ids:
+            await bot.edit_message_caption(
+                chat_id=message.chat.id,
+                message_id=media_group_message_ids[0],
+                caption=final_text,
+                parse_mode=ParseMode.HTML,
+            )
+            await bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=preview_message_id,
+                text="Подпись альбома обновлена",
+                reply_markup=preview_keyboard,
+            )
     if preview_data["type"] == "text":
         preview_data["text"] = final_text
     else:
         preview_data["caption"] = final_text
-    
     await state.update_data(preview_data=preview_data)
-    await message.answer("✅ Текст отредактирован, отправляю обновленное превью...")
-    await send_preview(message, state)
-
-
+    await message.answer("✅ Текст отредактирован.")
+    await message.delete()  # Удаляем сообщение пользователя
 
 @dp.callback_query(F.data == "regenerate")
 async def regenerate_handler(callback: types.CallbackQuery, state: FSMContext):
@@ -937,33 +943,63 @@ async def regenerate_handler(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.answer("❌ OpenAI вернул пустой ответ.")
         return
     preview_data = data.get("preview_data")
+    preview_message_id = data.get("preview_message_id")
+    media_group_message_ids = data.get("media_group_message_ids")
+    if preview_data["type"] == "text":
+        await bot.edit_message_text(
+            chat_id=callback.message.chat.id,
+            message_id=preview_message_id,
+            text=final_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=preview_keyboard,
+        )
+    elif preview_data["type"] in ["photo", "video", "animation", "document"]:
+        await bot.edit_message_caption(
+            chat_id=callback.message.chat.id,
+            message_id=preview_message_id,
+            caption=final_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=preview_keyboard,
+        )
+    elif preview_data["type"] == "media_group":
+        if media_group_message_ids:
+            await bot.edit_message_caption(
+                chat_id=callback.message.chat.id,
+                message_id=media_group_message_ids[0],
+                caption=final_text,
+                parse_mode=ParseMode.HTML,
+            )
+            await bot.edit_message_text(
+                chat_id=callback.message.chat.id,
+                message_id=preview_message_id,
+                text="Подпись альбома обновлена",
+                reply_markup=preview_keyboard,
+            )
     if preview_data["type"] == "text":
         preview_data["text"] = final_text
     else:
         preview_data["caption"] = final_text
     await state.update_data(preview_data=preview_data)
-    await send_preview(callback.message, state)
+    await callback.message.answer("✅ Текст сгенерирован заново.")
+
 
 @dp.callback_query(F.data == "cancel")
 async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
-    if callback.message.text:
-        await callback.message.edit_text("❌ Действие отменено.", reply_markup=None)
-    elif callback.message.caption:
-        await callback.message.edit_caption(caption="❌ Действие отменено.", reply_markup=None)
-    else:
-        await callback.message.delete()
-        await callback.message.answer("❌ Действие отменено.")
-    await state.set_state(BotStates.default)
-
-@dp.callback_query(F.data == "cancel_payment")
-async def cancel_payment_handler(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("❌ Выбор тарифа отменен.", reply_markup=None)
+    data = await state.get_data()
+    media_group_message_ids = data.get("media_group_message_ids")
+    if media_group_message_ids:
+        for msg_id in media_group_message_ids:
+            try:
+                await bot.delete_message(callback.message.chat.id, msg_id)
+            except Exception:
+                pass
+    await callback.message.delete()
+    await callback.message.answer("❌ Действие отменено.")
     await state.set_state(BotStates.default)
 
 # Точка входа
 async def main():
-    connector = ProxyConnector.from_url(proxy_url)
-    session_for_openai = aiohttp.ClientSession(connector=connector)
+    session_for_openai = aiohttp.ClientSession()
     openai.aiosession.set(session_for_openai)
     logging.info("Бот запущен. Ожидаю сообщения...")
     try:
